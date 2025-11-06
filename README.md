@@ -14,7 +14,7 @@
 ## 安装
 
 ```bash
-pip install -e .
+pip install localorm
 ```
 
 ## 快速开始
@@ -230,7 +230,7 @@ DataBase[Model](model_class: Type[Model], save_path: str)
 
 ```bash
 # 安装测试依赖
-pip install -e .
+pip install localorm
 
 # 运行测试
 pytest tests/ -v

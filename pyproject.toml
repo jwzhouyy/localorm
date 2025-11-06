@@ -1,0 +1,15 @@
+[project]
+name = "localorm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.12.3",
+    "pytest>=8.4.2",
+    "sqlalchemy>=2.0.44",
+    "sqlmodel>=0.0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/jwzhouyy/localorm"
