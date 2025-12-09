@@ -3,7 +3,7 @@
 from sqlmodel import Field
 from sqlalchemy import UniqueConstraint, JSON
 
-from ._core import DataBase, SQLModel, select, Model
+from ._core import DataBase, SQLModel, select, ModelT, ORMModel, PydanticField, DataclassField
 
 __all__ = [
     'DataBase',
@@ -12,5 +12,8 @@ __all__ = [
     'JSON',
     'UniqueConstraint',
     'select',
-    'Model',
+    'ModelT',
+    'ORMModel',
+    'PydanticField',
+    'DataclassField',
 ]

@@ -1,22 +1,94 @@
 # coding: utf-8
 
-import logging
 import time
+import logging
 
-from typing import Any, TypeVar, Generic, Type, Optional, Dict, List
-from sqlmodel import SQLModel, create_engine, Session, select
+from typing import Any, TypeVar, Generic, Optional, Dict, List
+from dataclasses import is_dataclass, asdict
+
+from pydantic import BaseModel
+from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import func, inspect, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from sqlalchemy.types import TypeDecorator, JSON
 
-Model = TypeVar('Model', bound=SQLModel)
+
+class PydanticJSON(TypeDecorator):
+    impl = JSON
+    cache_ok = True
+
+    def __init__(self, model: type[BaseModel], *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model = model
+
+    def process_bind_param(self, value: BaseModel, dialect):
+        if isinstance(value, BaseModel):
+            return value.model_dump()
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return self.model(**value)
 
 
-class DataBase(Generic[Model]):
-    def __init__(self, model_class: Type[Model], save_path: str):
+class DataClassJSON(TypeDecorator):
+    impl = JSON
+    cache_ok = True
 
-        self.model_class = model_class
-        self.engine = create_engine(f'sqlite:///{save_path}', echo=False)
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def process_bind_param(self, value, dialect):
+        if is_dataclass(value):
+            return asdict(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return self.model(**value)
+
+
+def PydanticField(model: type[BaseModel], default=None):
+    return Field(default=default, sa_type=PydanticJSON(model))
+
+
+def DataclassField(model, default=None):
+    return Field(default=default, sa_type=DataClassJSON(model))
+
+
+class ORMModel(SQLModel):
+    id: int = Field(default=None, primary_key=True)
+    create_time: int | None = None
+
+
+ModelT = TypeVar('ModelT', bound=ORMModel)
+
+
+class DataBase(Generic[ModelT]):
+    ModelClass: ModelT
+
+    def __init__(self, save_path: str):
+        if not hasattr(self, 'ModelClass') or self.ModelClass is None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} must override `ModelClass` with a SQLModel subclass"
+            )
+        assert issubclass(self.ModelClass, SQLModel), 'ModelClass must be a SQLModel subclass'
+
+        self.engine = create_engine(
+            f'sqlite:///{save_path}', echo=False,
+            connect_args={
+                "check_same_thread": False
+            },
+        )
+        # --- WAL 模式 ---
+        with self.engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL;"))
+            conn.execute(text("PRAGMA synchronous=NORMAL;"))
+
         SQLModel.metadata.create_all(self.engine)
         self._sync_table()
 
@@ -24,7 +96,7 @@ class DataBase(Generic[Model]):
         return Session(self.engine)
 
     def _sync_table(self):
-        table_name = self.model_class.__tablename__
+        table_name = self.ModelClass.__tablename__
 
         with self.engine.connect() as conn:
             inspector = inspect(conn)
@@ -35,7 +107,7 @@ class DataBase(Generic[Model]):
                 return
 
             db_columns = {col['name'] for col in inspector.get_columns(table_name)}
-            model_columns = set(self.model_class.model_fields.keys())
+            model_columns = set(self.ModelClass.model_fields.keys())
 
             added = model_columns - db_columns
             removed = db_columns - model_columns
@@ -45,7 +117,7 @@ class DataBase(Generic[Model]):
 
             # Add new fields
             for name in added:
-                field = self.model_class.model_fields[name]
+                field = self.ModelClass.model_fields[name]
                 sql_type = self._map_python_type_to_sql(field.annotation)
                 sql = f'ALTER TABLE {table_name} ADD COLUMN {name} {sql_type}'
                 conn.execute(text(sql))
@@ -127,7 +199,7 @@ class DataBase(Generic[Model]):
                 conn.execute(text(f"DROP TABLE {old_table_backup}"))
                 logging.getLogger(__name__).info("✅ Table %s successfully rebuilt, old table cleaned up", table_name)
             except Exception as cleanup_error:
-                logging.getLogger(__name__).warning("⚠️ New table ready, but failed to clean up old table: %s", 
+                logging.getLogger(__name__).warning("⚠️ New table ready, but failed to clean up old table: %s",
                                                     cleanup_error)
                 # This doesn't affect main functionality, can be cleaned up manually later
 
@@ -144,24 +216,26 @@ class DataBase(Generic[Model]):
     # CRUD
     # ============================================================
 
-    def add_model(self, data: dict[str, Any]) -> Model:
+    def add_model(self, data: dict[str, Any]) -> ModelT:
         with self._get_session() as session:
             # ✅ Only keep fields defined in the model
-            valid_keys = set(self.model_class.model_fields.keys())
+            valid_keys = set(self.ModelClass.model_fields.keys())
             data = {k: v for k, v in data.items() if k in valid_keys}
-            obj = self.model_class(**data)
+            if 'create_time' not in data:
+                data['create_time'] = int(time.time())
+            obj = self.ModelClass(**data)
             session.add(obj)
             session.commit()
             session.refresh(obj)
             return obj
 
-    def add_models(self, data_list: list[dict[str, Any]]) -> list[Model]:
+    def add_models(self, data_list: list[dict[str, Any]]) -> list[ModelT]:
         batch_size = 10000
         objects = []
         with self._get_session() as session:
-            valid_keys = set(self.model_class.model_fields.keys())
+            valid_keys = set(self.ModelClass.model_fields.keys())
             for i in range(0, len(data_list), batch_size):
-                batch = data_list[i : i + batch_size]
+                batch = data_list[i: i + batch_size]
                 logging.getLogger(__name__).info(
                     'Batch Add [%s:%s] %s/%s, %.4g%%',
                     i,
@@ -173,7 +247,9 @@ class DataBase(Generic[Model]):
                 batch_objects = []
                 for data in batch:
                     data = {k: v for k, v in data.items() if k in valid_keys}
-                    obj = self.model_class(**data)
+                    if 'create_time' not in data:
+                        data['create_time'] = int(time.time())
+                    obj = self.ModelClass(**data)
                     session.add(obj)
                     batch_objects.append(obj)
                 session.commit()
@@ -182,11 +258,13 @@ class DataBase(Generic[Model]):
                 objects.extend(batch_objects)
             return objects
 
-    def add_model_or_ignore(self, data: dict[str, Any]) -> Model | None:
+    def add_model_or_ignore(self, data: dict[str, Any]) -> ModelT | None:
         with self._get_session() as session:
-            valid_keys = set(self.model_class.model_fields.keys())
+            valid_keys = set(self.ModelClass.model_fields.keys())
             data = {k: v for k, v in data.items() if k in valid_keys}
-            stmt = sqlite_insert(self.model_class).values(**data)
+            if 'create_time' not in data:
+                data['create_time'] = int(time.time())
+            stmt = sqlite_insert(self.ModelClass).values(**data)
             stmt = stmt.prefix_with('OR IGNORE')
             result = session.execute(stmt)
             session.commit()
@@ -194,16 +272,16 @@ class DataBase(Generic[Model]):
             if result.rowcount == 0:
                 return None
 
-            pk_name = self.model_class.__mapper__.primary_key[0].name
+            pk_name = self.ModelClass.__mapper__.primary_key[0].name
             pk_value = data.get(pk_name)
             if pk_value is None:
                 pk_value = session.execute(text('SELECT last_insert_rowid()')).scalar()
 
-            return session.get(self.model_class, pk_value)
+            return session.get(self.ModelClass, pk_value)
 
     def delete_model_by_ids(self, ids: list[int]) -> int:
         with self._get_session() as session:
-            stmt = select(self.model_class).where(self.model_class.id.in_(ids))
+            stmt = select(self.ModelClass).where(self.ModelClass.id.in_(ids))
             results = session.exec(stmt).all()
             count = len(results)
             for item in results:
@@ -214,9 +292,9 @@ class DataBase(Generic[Model]):
     def delete_model_by_id(self, id: int) -> bool:
         return self.delete_model_by_ids([id]) > 0
 
-    def update_model_by_id(self, id: int, data: dict[str, Any]) -> Optional[Model]:
+    def update_model_by_id(self, id: int, data: dict[str, Any]) -> Optional[ModelT]:
         with self._get_session() as session:
-            obj = session.get(self.model_class, id)
+            obj = session.get(self.ModelClass, id)
             if not obj:
                 return None
             for k, v in data.items():
@@ -227,28 +305,33 @@ class DataBase(Generic[Model]):
             session.refresh(obj)
             return obj
 
-    def get_models_by_ids(self, ids: list[int]) -> Dict[int, Model]:
+    def get_models_by_ids(self, ids: list[int]) -> Dict[int, ModelT]:
         with self._get_session() as session:
-            stmt = select(self.model_class).where(self.model_class.id.in_(ids))
+            stmt = select(self.ModelClass).where(self.ModelClass.id.in_(ids))
             results = session.exec(stmt).all()
             return {obj.id: obj for obj in results}
 
-    def get_model_by_id(self, id: int) -> Optional[Model]:
+    def get_model_by_id(self, id: int) -> Optional[ModelT]:
         with self._get_session() as session:
-            return session.get(self.model_class, id)
+            return session.get(self.ModelClass, id)
 
-    def get_all_models(self) -> List[Model]:
+    def get_all_models(self, reverse: bool = False) -> List[ModelT]:
         with self._get_session() as session:
-            stmt = select(self.model_class)
+            stmt = select(self.ModelClass).order_by(
+                self.ModelClass.id.desc() if reverse else self.ModelClass.id.asc()
+            )
             results = session.exec(stmt).all()
             return results
 
+    def iter_all_models(self, reverse: bool = False):
+        yield from self.get_all_models(reverse=reverse)
+
     def get_count(self) -> int:
         with self._get_session() as session:
-            stmt = select(func.count()).select_from(self.model_class)
+            stmt = select(func.count()).select_from(self.ModelClass)
             result = session.exec(stmt).one()
             return result
 
-    def print_all(self):
-        for u in self.get_all_models():
+    def print_all(self, reverse=True):
+        for u in self.get_all_models(reverse=reverse):
             print(u)
