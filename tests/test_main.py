@@ -1,10 +1,16 @@
 # coding: utf-8
 
 import logging
+import os
+
 import time
+
+from dotenv import load_dotenv
+
 
 from dataclasses import dataclass
 from pydantic import BaseModel
+from sqlalchemy import BigInteger
 
 from localorm import (
     DataBase,
@@ -15,6 +21,9 @@ from localorm import (
     PydanticField,
     JSON,
     DataclassField,
+    Column,
+    URL,
+    immutabledict,
 )
 
 
@@ -27,6 +36,8 @@ class Property:
 class Extra(BaseModel):
     a: int | None = None
     b: str | None = 'abc'
+    c: str = 'c'
+    d: str = 'd'
 
 
 class UserRepository(DataBase['UserRepository.ModelClass']):
@@ -35,11 +46,23 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
         __table_args__ = (UniqueConstraint('s', 't', name='uq_user_s_t'),)  # 联合唯一索引
 
         name: str | None = None
-        # age: int | None = None
-        s: int | None = None
-        t: int
+        age: int | None = Field(
+            default=None,
+            sa_type=BigInteger,  # 关键：指定使用 BigInteger 类型
+        )
+        s: int | None = Field(
+            default=None,
+            sa_type=BigInteger,  # 关键：指定使用 BigInteger 类型
+        )
+        t: int = Field(
+            default=None,
+            sa_type=BigInteger,  # 关键：指定使用 BigInteger 类型
+        )
         extra: Extra | None = PydanticField(Extra)
-
+        my_dict: dict | None = Field(
+            default_factory=dict,
+            sa_column=Column(JSON, nullable=True),
+        )
         property: Property | None = DataclassField(Property)
 
     def get_users_by_name(self, name: str) -> list[ModelClass]:
@@ -56,23 +79,43 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
 
 
 # ============================================================
-# 测试示例
+# 测试示例 需要安装pymysql, cryptography
 # ============================================================
 def main():
+    load_dotenv()
     # user_repo = BaseRepository[User](User)
-    user_repo = UserRepository('tt.db')
-    user = user_repo.add_model(
-        {
-            # 'id': 12,
-            'name': 'jwz',
-            's': int(time.time() * 1000),
-            't': int(time.time() * 1000),
-            'age': 1,
-            'extra': {'a': 1, 'b': 'abc'},
-            'property': {'a': 1, 'b': 'abc'},
-        }
+    # user_repo = UserRepository(
+    #     URL(
+    #         drivername='mysql+pymysql',
+    #         username=os.getenv('MYSQL_USERNAME'),
+    #         password=os.getenv('MYSQL_PASS'),
+    #         host=os.getenv('MYSQL_HOST'),
+    #         port=int(os.getenv('MYSQL_PORT')),
+    #         database='free_misc',
+    #         query=immutabledict({'charset': 'utf8mb4'}),
+    #     )
+    # )
+    user_repo = UserRepository(
+        'sqlite:///tt.db',
+        connect_args={
+            'check_same_thread': False,
+            'timeout': 30,
+        },
     )
-    u = user_repo.get_model_by_id(user.id)
+    user_repo.get_model_by_id(42)
+    # user = user_repo.add_model(
+    #     {
+    #         # 'id': 12,
+    #         'name': 'jwz',
+    #         's': int(time.time() * 1000),
+    #         't': int(time.time() * 1000),
+    #         'age': 1,
+    #         # 'property': {'a': 1, 'b': 'abc', 'c': 'c', 'd': 123},
+    #         'extra': {'a': 1, 'b': 'abc', 'c': 'c'},
+    #     }
+    # )
+    # u = user_repo.get_model_by_id(user.id)
+    # print(u)
     # print(u.property.b)
     # us = []
     # for i in range(10):
@@ -88,11 +131,13 @@ def main():
     #     print(u)
     # u = user_repo.get_model_by_id(5)
     # print(u)
-    user_repo.print_all(reverse=False)
+    # for u in user_repo.iter_all_models(reverse=True, batch_size=2):
+    #     print(u)
     # d = user_repo.get_users_by_name('jwz')
-    # d = user_repo.gett(9, 1762252019)
+    # d = user_repo.gett(1767078437392, 1767078437392)
 
     # print(d)
+    # print(user_repo.get_count())
 
 
 if __name__ == '__main__':

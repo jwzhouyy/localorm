@@ -73,7 +73,7 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
 ### 2. 创建数据库实例
 
 ```python
-user_repo = UserRepository('tt.db')
+user_repo = UserRepository('sqlite///tt.db')
 ```
 
 ### 3. CRUD 操作
@@ -145,7 +145,7 @@ user = user_repo.get_model_by_id(1)
 users_dict = user_repo.get_models_by_ids([1, 2, 3])  # 返回 {id: model} 字典
 
 # 查询所有
-all_users = user_repo.get_all_models()
+all_users = user_repo.iter_all_models()
 
 # 获取总数
 count = user_repo.get_count()
@@ -267,7 +267,7 @@ LocalORM 支持以下 Python 类型到 SQL 类型的自动映射：
 
 - \`get_model_by_id(id: int) -> Optional[Model]\` - 通过ID查询
 - \`get_models_by_ids(ids: list[int]) -> Dict[int, Model]\` - 批量查询
-- \`get_all_models() -> List[Model]\` - 查询所有
+- \`iter_all_models() -> List[Model]\` - 查询所有
 - \`get_count() -> int\` - 获取总数
 
 #### 更新操作
@@ -347,7 +347,7 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
 # ============================================================
 def main():
     # user_repo = BaseRepository[User](User)
-    user_repo = UserRepository('/Users/xx/tt.db')
+    user_repo = UserRepository('sqlite////Users/xx/tt.db')
     user = user_repo.add_model({
         # 'id': 12,
         'name': 'jwz',

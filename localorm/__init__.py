@@ -1,7 +1,8 @@
 # coding: utf-8
 
-from sqlmodel import Field
-from sqlalchemy import UniqueConstraint, JSON
+from sqlmodel import Field, Column
+from sqlalchemy import UniqueConstraint, JSON, Index, URL
+from sqlalchemy.util import immutabledict
 
 from ._core import DataBase, SQLModel, select, ModelT, ORMModel, PydanticField, DataclassField
 
@@ -11,9 +12,13 @@ __all__ = [
     'Field',
     'JSON',
     'UniqueConstraint',
+    'Index',
+    'Column',
     'select',
     'ModelT',
     'ORMModel',
     'PydanticField',
     'DataclassField',
+    'URL'
+    'immutabledict'
 ]

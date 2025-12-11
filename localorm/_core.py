@@ -3,13 +3,12 @@
 import time
 import logging
 
-from typing import Any, Optional, TypeVar, Generic
-from dataclasses import is_dataclass, asdict
+from typing import Any, Optional, TypeVar, Generic, Iterator
+from dataclasses import is_dataclass, asdict, fields
 
 from pydantic import BaseModel
 from sqlmodel import Field, SQLModel, create_engine, Session, select
-from sqlalchemy import func, inspect, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import BigInteger, Integer, func, inspect, text, URL
 
 from sqlalchemy.types import TypeDecorator, JSON
 
@@ -49,7 +48,7 @@ class DataClassJSON(TypeDecorator):
     def process_result_value(self, value, dialect):
         if value is None:
             return None
-        return self.model(**value)
+        return self.model(**{k: v for k, v in value.items() if k in fields(self.model)})
 
 
 def PydanticField(model: type[BaseModel], default=None):
@@ -61,8 +60,10 @@ def DataclassField(model, default=None):
 
 
 class ORMModel(SQLModel):
-    id: int = Field(default=None, primary_key=True)
-    create_time: int | None = None
+    id: int = Field(default=None, primary_key=True, sa_type=Integer)
+    create_time: int = Field(
+        sa_type=BigInteger,
+    )
 
 
 ModelT = TypeVar('ModelT', bound=ORMModel)
@@ -70,8 +71,22 @@ ModelT = TypeVar('ModelT', bound=ORMModel)
 
 class DataBase(Generic[ModelT]):
     ModelClass: ModelT
+    _instances = {}  # Class variable to store instances
 
-    def __init__(self, save_path: str):
+    def __new__(cls, *args, **kwargs):
+        # Use save_path as key for different database instances
+        if cls not in cls._instances:
+            instance = super().__new__(cls)
+            cls._instances[cls] = instance
+            # Set a flag to indicate initialization needed
+            instance._initialized = False
+        return cls._instances[cls]
+
+    def __init__(self, url: str | URL, **engine_confg):
+        # Skip initialization if already done
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+
         if not hasattr(self, 'ModelClass') or self.ModelClass is None:
             raise NotImplementedError(
                 f'{self.__class__.__name__} must override `ModelClass` with a SQLModel subclass'
@@ -79,21 +94,15 @@ class DataBase(Generic[ModelT]):
         assert issubclass(self.ModelClass, SQLModel), 'ModelClass must be a SQLModel subclass'
 
         self.engine = create_engine(
-            f'sqlite:///{save_path}',
+            url,
             echo=False,
-            connect_args={
-                'check_same_thread': False,
-                'timeout': 30,
-            },
             pool_pre_ping=True,
+            **engine_confg,
         )
-        # --- WAL 模式 ---
-        # with self.engine.connect() as conn:
-        #     conn.execute(text('PRAGMA journal_mode=WAL;'))
-        #     conn.execute(text('PRAGMA synchronous=NORMAL;'))
 
         SQLModel.metadata.create_all(self.engine)
         self._sync_table()
+        self._initialized = True
 
     def _get_session(self) -> Session:
         return Session(self.engine)
@@ -154,9 +163,6 @@ class DataBase(Generic[ModelT]):
         temp_table_name = f'{table_name}_{timestamp}'
         logging.getLogger(__name__).info('Temporary table name: %s', temp_table_name)
         try:
-            # Start transaction
-            conn.execute(text('BEGIN TRANSACTION'))
-
             # 1. Create new table structure using SQLModel (with temporary table name)
             # Temporarily modify table name to create new structure
             original_table_name = None
@@ -232,7 +238,7 @@ class DataBase(Generic[ModelT]):
             valid_keys = set(self.ModelClass.model_fields.keys())
             data = {k: v for k, v in data.items() if k in valid_keys}
             if 'create_time' not in data:
-                data['create_time'] = int(time.time())
+                data['create_time'] = int(time.time() * 1000)
             obj = self.ModelClass(**data)
             session.add(obj)
             session.commit()
@@ -274,8 +280,7 @@ class DataBase(Generic[ModelT]):
             data = {k: v for k, v in data.items() if k in valid_keys}
             if 'create_time' not in data:
                 data['create_time'] = int(time.time())
-            stmt = sqlite_insert(self.ModelClass).values(**data)
-            stmt = stmt.prefix_with('OR IGNORE')
+            stmt = select(self.ModelClass.__table__.insert().prefix_with('IGNORE').values(**data))
             result = session.execute(stmt)
             session.commit()
 
@@ -285,7 +290,7 @@ class DataBase(Generic[ModelT]):
             pk_name = self.ModelClass.__mapper__.primary_key[0].name
             pk_value = data.get(pk_name)
             if pk_value is None:
-                pk_value = session.execute(text('SELECT last_insert_rowid()')).scalar()
+                pk_value = session.execute(text('SELECT LAST_INSERT_ID()')).scalar()
 
             return session.get(self.ModelClass, pk_value)
 
@@ -302,7 +307,10 @@ class DataBase(Generic[ModelT]):
     def delete_model_by_id(self, id: int) -> bool:
         return self.delete_model_by_ids([id]) > 0
 
-    def update_model_by_id(self, id: int, data: dict[str, Any]) -> ModelT | None:
+    # todo
+    def update_model_by_id(
+        self, id: int, data: dict[str, Any], del_keys: list[str] | None = None
+    ) -> ModelT | None:
         with self._get_session() as session:
             obj = session.get(self.ModelClass, id)
             if not obj:
@@ -325,16 +333,21 @@ class DataBase(Generic[ModelT]):
         with self._get_session() as session:
             return session.get(self.ModelClass, id)
 
-    def get_all_models(self, reverse: bool = False) -> list[ModelT]:
+    def iter_all_models(self, reverse: bool = True, batch_size: int = 100) -> Iterator[ModelT]:
         with self._get_session() as session:
-            stmt = select(self.ModelClass).order_by(
-                self.ModelClass.id.desc() if reverse else self.ModelClass.id.asc()
-            )
-            results = session.exec(stmt).all()
-            return results
-
-    def iter_all_models(self, reverse: bool = False):
-        yield from self.get_all_models(reverse=reverse)
+            offset = 0
+            while True:
+                stmt = (
+                    select(self.ModelClass)
+                    .order_by(self.ModelClass.id.desc() if reverse else self.ModelClass.id.asc())
+                    .offset(offset)
+                    .limit(batch_size)
+                )
+                batch = session.exec(stmt).all()
+                if not batch:
+                    break
+                yield from batch
+                offset += batch_size
 
     def get_count(self) -> int:
         with self._get_session() as session:
@@ -343,5 +356,5 @@ class DataBase(Generic[ModelT]):
             return result
 
     def print_all(self, reverse=True):
-        for u in self.get_all_models(reverse=reverse):
+        for u in self.iter_all_models(reverse=reverse):
             print(u)
