@@ -6,7 +6,16 @@ import time
 from dataclasses import dataclass
 from pydantic import BaseModel
 
-from localorm import DataBase, UniqueConstraint, Field, select, ORMModel, PydanticField, JSON, DataclassField
+from localorm import (
+    DataBase,
+    UniqueConstraint,
+    Field,
+    select,
+    ORMModel,
+    PydanticField,
+    JSON,
+    DataclassField,
+)
 
 
 @dataclass
@@ -41,9 +50,7 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
 
     def gett(self, s, t):
         with self._get_session() as session:
-            stmt = (
-                select(self.ModelClass).where(self.ModelClass.s == s).where(self.ModelClass.t == t)
-            )
+            stmt = select(self.ModelClass).where(self.ModelClass.s == s).where(self.ModelClass.t == t)
             results = session.exec(stmt).all()
             return results
 
@@ -54,21 +61,17 @@ class UserRepository(DataBase['UserRepository.ModelClass']):
 def main():
     # user_repo = BaseRepository[User](User)
     user_repo = UserRepository('tt.db')
-    user = user_repo.add_model({
-        # 'id': 12,
-        'name': 'jwz',
-        's': int(time.time() * 1000),
-        't': int(time.time() * 1000),
-        'age': 1,
-        'extra': {
-            'a': 1,
-            'b': 'abc'
-        },
-        'property': {
-            'a': 1,
-            'b': 'abc'
+    user = user_repo.add_model(
+        {
+            # 'id': 12,
+            'name': 'jwz',
+            's': int(time.time() * 1000),
+            't': int(time.time() * 1000),
+            'age': 1,
+            'extra': {'a': 1, 'b': 'abc'},
+            'property': {'a': 1, 'b': 'abc'},
         }
-    })
+    )
     u = user_repo.get_model_by_id(user.id)
     # print(u.property.b)
     # us = []

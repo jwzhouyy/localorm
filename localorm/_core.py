@@ -3,7 +3,7 @@
 import time
 import logging
 
-from typing import Any, TypeVar, Generic, Optional, Dict, List
+from typing import Any, Optional, TypeVar, Generic
 from dataclasses import is_dataclass, asdict
 
 from pydantic import BaseModel
@@ -74,20 +74,23 @@ class DataBase(Generic[ModelT]):
     def __init__(self, save_path: str):
         if not hasattr(self, 'ModelClass') or self.ModelClass is None:
             raise NotImplementedError(
-                f"{self.__class__.__name__} must override `ModelClass` with a SQLModel subclass"
+                f'{self.__class__.__name__} must override `ModelClass` with a SQLModel subclass'
             )
         assert issubclass(self.ModelClass, SQLModel), 'ModelClass must be a SQLModel subclass'
 
         self.engine = create_engine(
-            f'sqlite:///{save_path}', echo=False,
+            f'sqlite:///{save_path}',
+            echo=False,
             connect_args={
-                "check_same_thread": False
+                'check_same_thread': False,
+                'timeout': 30,
             },
+            pool_pre_ping=True,
         )
         # --- WAL 模式 ---
-        with self.engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL;"))
-            conn.execute(text("PRAGMA synchronous=NORMAL;"))
+        # with self.engine.connect() as conn:
+        #     conn.execute(text('PRAGMA journal_mode=WAL;'))
+        #     conn.execute(text('PRAGMA synchronous=NORMAL;'))
 
         SQLModel.metadata.create_all(self.engine)
         self._sync_table()
@@ -148,11 +151,11 @@ class DataBase(Generic[ModelT]):
         """
         # Generate temporary table name with timestamp
         timestamp = int(time.time() * 1000)
-        temp_table_name = f"{table_name}_{timestamp}"
+        temp_table_name = f'{table_name}_{timestamp}'
         logging.getLogger(__name__).info('Temporary table name: %s', temp_table_name)
         try:
             # Start transaction
-            conn.execute(text("BEGIN TRANSACTION"))
+            conn.execute(text('BEGIN TRANSACTION'))
 
             # 1. Create new table structure using SQLModel (with temporary table name)
             # Temporarily modify table name to create new structure
@@ -185,32 +188,39 @@ class DataBase(Generic[ModelT]):
             conn.execute(text(copy_sql))
             # 3. Atomic table name swap
             # First rename old table (backup)
-            old_table_backup = f"{table_name}_old_{timestamp}"
-            conn.execute(text(f"ALTER TABLE {table_name} RENAME TO {old_table_backup}"))
+            old_table_backup = f'{table_name}_old_{timestamp}'
+            conn.execute(text(f'ALTER TABLE {table_name} RENAME TO {old_table_backup}'))
 
             # Then rename new table to target table name
-            conn.execute(text(f"ALTER TABLE {temp_table_name} RENAME TO {table_name}"))
+            conn.execute(text(f'ALTER TABLE {temp_table_name} RENAME TO {table_name}'))
 
             # Commit transaction
             conn.commit()
 
             # 4. 清理旧表（在事务外执行，避免事务过大）
             try:
-                conn.execute(text(f"DROP TABLE {old_table_backup}"))
-                logging.getLogger(__name__).info("✅ Table %s successfully rebuilt, old table cleaned up", table_name)
+                conn.execute(text(f'DROP TABLE {old_table_backup}'))
+                logging.getLogger(__name__).info(
+                    '✅ Table %s successfully rebuilt, old table cleaned up', table_name
+                )
             except Exception as cleanup_error:
-                logging.getLogger(__name__).warning("⚠️ New table ready, but failed to clean up old table: %s",
-                                                    cleanup_error)
+                logging.getLogger(__name__).warning(
+                    '⚠️ New table ready, but failed to clean up old table: %s', cleanup_error
+                )
                 # This doesn't affect main functionality, can be cleaned up manually later
 
-            logging.getLogger(__name__).info('✅ Table %s rebuild complete, data migrated to new structure', table_name)
+            logging.getLogger(__name__).info(
+                '✅ Table %s rebuild complete, data migrated to new structure', table_name
+            )
         except Exception as e:
             # Rollback transaction
             conn.rollback()
-            logging.getLogger(__name__).error('❌ Table rebuild failed: %s, all changes rolled back', str(e))
+            logging.getLogger(__name__).error(
+                '❌ Table rebuild failed: %s, all changes rolled back', str(e)
+            )
         finally:
             # 清理可能创建的临时表
-            conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name}"))
+            conn.execute(text(f'DROP TABLE IF EXISTS {temp_table_name}'))
 
     # ============================================================
     # CRUD
@@ -235,7 +245,7 @@ class DataBase(Generic[ModelT]):
         with self._get_session() as session:
             valid_keys = set(self.ModelClass.model_fields.keys())
             for i in range(0, len(data_list), batch_size):
-                batch = data_list[i: i + batch_size]
+                batch = data_list[i : i + batch_size]
                 logging.getLogger(__name__).info(
                     'Batch Add [%s:%s] %s/%s, %.4g%%',
                     i,
@@ -292,7 +302,7 @@ class DataBase(Generic[ModelT]):
     def delete_model_by_id(self, id: int) -> bool:
         return self.delete_model_by_ids([id]) > 0
 
-    def update_model_by_id(self, id: int, data: dict[str, Any]) -> Optional[ModelT]:
+    def update_model_by_id(self, id: int, data: dict[str, Any]) -> ModelT | None:
         with self._get_session() as session:
             obj = session.get(self.ModelClass, id)
             if not obj:
@@ -305,17 +315,17 @@ class DataBase(Generic[ModelT]):
             session.refresh(obj)
             return obj
 
-    def get_models_by_ids(self, ids: list[int]) -> Dict[int, ModelT]:
+    def get_models_by_ids(self, ids: list[int]) -> dict[int, ModelT]:
         with self._get_session() as session:
             stmt = select(self.ModelClass).where(self.ModelClass.id.in_(ids))
             results = session.exec(stmt).all()
             return {obj.id: obj for obj in results}
 
-    def get_model_by_id(self, id: int) -> Optional[ModelT]:
+    def get_model_by_id(self, id: int) -> ModelT | None:
         with self._get_session() as session:
             return session.get(self.ModelClass, id)
 
-    def get_all_models(self, reverse: bool = False) -> List[ModelT]:
+    def get_all_models(self, reverse: bool = False) -> list[ModelT]:
         with self._get_session() as session:
             stmt = select(self.ModelClass).order_by(
                 self.ModelClass.id.desc() if reverse else self.ModelClass.id.asc()
